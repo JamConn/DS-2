@@ -42,6 +42,10 @@ export class EDAAppStack extends cdk.Stack {
       retentionPeriod: cdk.Duration.minutes(5),
     });
 
+    const metadataQueue = new sqs.Queue(this, "metadata-queue", {
+      retentionPeriod: cdk.Duration.minutes(5),
+    });
+
 
     const newImageTopic = new sns.Topic(this, "NewImageTopic", {
       displayName: "New Image topic",
@@ -59,6 +63,8 @@ export class EDAAppStack extends cdk.Stack {
       },
     });
 
+
+
     const removeImageFn = new lambdanode.NodejsFunction(this, "RemoveImageFn", {
       architecture: lambda.Architecture.ARM_64,
       runtime: lambda.Runtime.NODEJS_22_X,
@@ -70,15 +76,29 @@ export class EDAAppStack extends cdk.Stack {
       },
     });
 
+    const addMetadataFn = new lambdanode.NodejsFunction(this, "AddMetadataFn", {
+      architecture: lambda.Architecture.ARM_64,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: `${__dirname}/../lambdas/addMetadata.ts`,
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 128,
+      environment: {
+        IMAGES_TABLE: imagesTable.tableName,
+      },
+    });
+
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
       new s3n.SnsDestination(newImageTopic)
     );
 
 
-newImageTopic.addSubscription(
-  new subs.SqsSubscription(imageProcessQueue)
-);
+   newImageTopic.addSubscription(
+      new subs.SqsSubscription(imageProcessQueue)
+    );
+
+    newImageTopic.addSubscription(
+      new subs.SqsSubscription(metadataQueue));
 
     // SQS 
     logImageFn.addEventSource(
@@ -95,8 +115,16 @@ newImageTopic.addSubscription(
       })
     );
 
+    addMetadataFn.addEventSource(
+      new events.SqsEventSource(metadataQueue, {
+        batchSize: 5,
+        maxBatchingWindow: cdk.Duration.seconds(5),
+      })
+    );
+
 
     imagesTable.grantWriteData(logImageFn);
+    imagesTable.grantReadWriteData(addMetadataFn);
     imagesBucket.grantDelete(removeImageFn);
     
     new cdk.CfnOutput(this, "BucketName", {
@@ -113,5 +141,14 @@ newImageTopic.addSubscription(
     new cdk.CfnOutput(this, "BadImagesQueueUrl", {
       value: badImagesQueue.queueUrl,
     });
+
+    new cdk.CfnOutput(this, "MetadataQueueUrl", { 
+      value: metadataQueue.queueUrl 
+    });
+
+    new cdk.CfnOutput(this, "NewImageTopicArn", {
+      value: newImageTopic.topicArn,
+    });
+ 
   }
 }
