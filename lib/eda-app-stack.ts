@@ -8,6 +8,7 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as iam from "aws-cdk-lib/aws-iam";
 
 import { Construct } from "constructs";
 
@@ -50,10 +51,19 @@ export class EDAAppStack extends cdk.Stack {
       retentionPeriod: cdk.Duration.minutes(5),
     });
 
+    const mailerQueue = new sqs.Queue(this, "mailer-queue", {
+      receiveMessageWaitTime: cdk.Duration.seconds(10),
+    });
+
 
     const newImageTopic = new sns.Topic(this, "NewImageTopic", {
       displayName: "New Image topic",
     });
+    
+
+    const reviewTopic = new sns.Topic(this, "ReviewTopic", {
+      displayName: "Image Review Completed topic",
+    })
 
     // Log Image Lambda 
     const logImageFn = new lambdanode.NodejsFunction(this, "LogImageFn", {
@@ -91,14 +101,34 @@ export class EDAAppStack extends cdk.Stack {
       },
     });
 
-    const updateStatusFn = new lambdanode.NodejsFunction(this, "UpdateStatusFn", {
-      architecture: lambda.Architecture.ARM_64,
-      runtime: lambda.Runtime.NODEJS_22_X,
-      entry: `${__dirname}/../lambdas/updateStatus.ts`,
-      timeout: cdk.Duration.seconds(10),
-      memorySize: 128,
-      environment: { IMAGES_TABLE: imagesTable.tableName },
-    });
+    const updateStatusFn = new lambdanode.NodejsFunction(
+      this,
+      "UpdateStatusFn",
+      {
+        architecture: lambda.Architecture.ARM_64,
+        runtime: lambda.Runtime.NODEJS_22_X,
+        entry: `${__dirname}/../lambdas/updateStatus.ts`,
+        timeout: cdk.Duration.seconds(10),
+        memorySize: 128,
+        environment: {
+          IMAGES_TABLE: imagesTable.tableName,
+        },
+      }
+    );
+    updateStatusFn.addEnvironment("REVIEW_TOPIC_ARN", reviewTopic.topicArn);
+
+    const confirmationMailerFn = new lambdanode.NodejsFunction(
+      this,
+      "ConfirmationMailerFn",
+      {
+        architecture: lambda.Architecture.ARM_64,
+        runtime: lambda.Runtime.NODEJS_22_X,
+        entry: `${__dirname}/../lambdas/confirmationMailer.ts`,
+        timeout: cdk.Duration.seconds(10),
+        memorySize: 128,
+      }
+    );
+
 
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
@@ -111,11 +141,18 @@ export class EDAAppStack extends cdk.Stack {
     );
 
     newImageTopic.addSubscription(
-      new subs.SqsSubscription(metadataQueue));
+      new subs.SqsSubscription(metadataQueue)
+    );
 
     newImageTopic.addSubscription(
-      new subs.SqsSubscription(reviewQueue));
+      new subs.SqsSubscription(reviewQueue)
+    );
 
+    reviewTopic.addSubscription(
+      new subs.SqsSubscription(mailerQueue)
+    );
+
+ 
     // SQS 
     logImageFn.addEventSource(
       new events.SqsEventSource(imageProcessQueue, {
@@ -143,11 +180,29 @@ export class EDAAppStack extends cdk.Stack {
       maxBatchingWindow: cdk.Duration.seconds(5),
     }));
 
+    const mailerEventSource = new events.SqsEventSource(mailerQueue, {
+      batchSize: 5,
+      maxBatchingWindow: cdk.Duration.seconds(5),
+    });
+    confirmationMailerFn.addEventSource(mailerEventSource);
+
+
 
     imagesTable.grantWriteData(logImageFn);
     imagesTable.grantReadWriteData(addMetadataFn);
     imagesTable.grantReadWriteData(updateStatusFn);
     imagesBucket.grantDelete(removeImageFn);
+    reviewTopic.grantPublish(updateStatusFn);
+
+    //mailer add role
+
+    confirmationMailerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ses:SendEmail", "ses:SendRawEmail", "ses:SendTemplatedEmail"],
+        resources: ["*"],
+      })
+    );
     
     new cdk.CfnOutput(this, "BucketName", {
       value: imagesBucket.bucketName,
@@ -175,6 +230,17 @@ export class EDAAppStack extends cdk.Stack {
     new cdk.CfnOutput(this, "ReviewQueueUrl", { 
       value: reviewQueue.queueUrl 
     });
+
+    new cdk.CfnOutput(this, "MailerQueueUrl", 
+      { value: mailerQueue.queueUrl }
+    );
+
+    new cdk.CfnOutput(this, "ReviewTopicArn", { 
+      value: reviewTopic.topicArn }
+    );
+
+
+    
  
   }
 }
