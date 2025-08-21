@@ -59,6 +59,16 @@ export class EDAAppStack extends cdk.Stack {
       },
     });
 
+    const removeImageFn = new lambdanode.NodejsFunction(this, "RemoveImageFn", {
+      architecture: lambda.Architecture.ARM_64,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: `${__dirname}/../lambdas/removeImage.ts`,
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 128,
+      environment: {
+        BUCKET_NAME: imagesBucket.bucketName,
+      },
+    });
 
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
@@ -78,8 +88,16 @@ newImageTopic.addSubscription(
       })
     );
 
+    removeImageFn.addEventSource(
+      new events.SqsEventSource(badImagesQueue, {
+        batchSize: 5,
+        maxBatchingWindow: cdk.Duration.seconds(5),
+      })
+    );
+
 
     imagesTable.grantWriteData(logImageFn);
+    imagesBucket.grantDelete(removeImageFn);
     
     new cdk.CfnOutput(this, "BucketName", {
       value: imagesBucket.bucketName,
