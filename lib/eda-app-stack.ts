@@ -46,6 +46,10 @@ export class EDAAppStack extends cdk.Stack {
       retentionPeriod: cdk.Duration.minutes(5),
     });
 
+    const reviewQueue = new sqs.Queue(this, "review-queue", {
+      retentionPeriod: cdk.Duration.minutes(5),
+    });
+
 
     const newImageTopic = new sns.Topic(this, "NewImageTopic", {
       displayName: "New Image topic",
@@ -87,6 +91,15 @@ export class EDAAppStack extends cdk.Stack {
       },
     });
 
+    const updateStatusFn = new lambdanode.NodejsFunction(this, "UpdateStatusFn", {
+      architecture: lambda.Architecture.ARM_64,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: `${__dirname}/../lambdas/updateStatus.ts`,
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 128,
+      environment: { IMAGES_TABLE: imagesTable.tableName },
+    });
+
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
       new s3n.SnsDestination(newImageTopic)
@@ -99,6 +112,9 @@ export class EDAAppStack extends cdk.Stack {
 
     newImageTopic.addSubscription(
       new subs.SqsSubscription(metadataQueue));
+
+    newImageTopic.addSubscription(
+      new subs.SqsSubscription(reviewQueue));
 
     // SQS 
     logImageFn.addEventSource(
@@ -122,9 +138,15 @@ export class EDAAppStack extends cdk.Stack {
       })
     );
 
+    updateStatusFn.addEventSource(new events.SqsEventSource(reviewQueue, {
+      batchSize: 5,
+      maxBatchingWindow: cdk.Duration.seconds(5),
+    }));
+
 
     imagesTable.grantWriteData(logImageFn);
     imagesTable.grantReadWriteData(addMetadataFn);
+    imagesTable.grantReadWriteData(updateStatusFn);
     imagesBucket.grantDelete(removeImageFn);
     
     new cdk.CfnOutput(this, "BucketName", {
@@ -148,6 +170,10 @@ export class EDAAppStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, "NewImageTopicArn", {
       value: newImageTopic.topicArn,
+    });
+
+    new cdk.CfnOutput(this, "ReviewQueueUrl", { 
+      value: reviewQueue.queueUrl 
     });
  
   }
